@@ -1,8 +1,13 @@
-import websocket
+import asyncio
+import websockets
 import json
 import base64
 import os
-import time
+import logging
+
+# Configuração de logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class ImageDisplay:
     def __init__(self):
@@ -22,72 +27,64 @@ class ImageDisplay:
         # Inicia o feh em modo slideshow com ordem numérica
         cmd = f"feh -F -Z -D {self.transition_time} -R {self.transition_time} --sort filename {self.image_dir}/* &"
         os.system(cmd)
-        print("🖼️ Feh iniciado em modo slideshow")
+        logger.info("🖼️ Feh iniciado em modo slideshow")
     
     def add_image(self, image_data, index):
-        # Salva a imagem no diretório com padding de zeros para ordenação correta
+        # Salva a imagem no diretório
         filename = os.path.join(self.image_dir, f"image_{index:03d}.png")
         with open(filename, "wb") as f:
             f.write(base64.b64decode(image_data))
-        print(f"✨ Imagem salva: {filename}")
+        logger.info(f"✨ Imagem salva: {filename}")
         
         # Força o feh a recarregar as imagens
         os.system("pkill -USR1 feh")
 
-def on_message(ws, message):
+# Cria instância global do display
+display = ImageDisplay()
+
+async def handle_connection(websocket):
+    logger.info("🔗 Nova conexão recebida")
     try:
-        data = json.loads(message)
-        image = data.get("image")
-        index = data.get("index", 0)
-        transition_time = data.get("transition_time", 15)
-        
-        if image:
-            display.add_image(image, index)
-            print(f"📥 Recebida imagem {index}")
+        async for message in websocket:
+            try:
+                data = json.loads(message)
+                image = data.get("image")
+                index = data.get("index", 0)
+                transition_time = data.get("transition_time", 15)
+                
+                if image:
+                    display.add_image(image, index)
+                    logger.info(f"📥 Recebida e processada imagem {index}")
+                
+            except json.JSONDecodeError as e:
+                logger.error(f"❌ Erro ao decodificar mensagem: {e}")
+            except Exception as e:
+                logger.error(f"❌ Erro ao processar mensagem: {e}")
+    
+    except websockets.exceptions.ConnectionClosed:
+        logger.info("🔌 Conexão fechada")
     except Exception as e:
-        print(f"❌ Erro ao processar mensagem: {e}")
+        logger.error(f"❌ Erro na conexão: {e}")
 
-def on_error(ws, error):
-    print(f"❌ Erro: {error}")
-
-def on_close(ws, close_status_code, close_msg):
-    print("🔌 Conexão fechada, tentando reconectar...")
-    time.sleep(5)  # Espera 5 segundos antes de reconectar
-    connect_websocket()  # Tenta reconectar
-
-def on_open(ws):
-    print("🔗 Conexão WebSocket estabelecida")
-    # Envia mensagem identificando este Raspberry Pi
+async def main():
+    # Pega o IP do Raspberry Pi
     ip = os.popen("hostname -I | awk '{print $1}'").read().strip()
-    ws.send(json.dumps({"type": "identify", "ip": ip}))
+    port = 8081  # Porta para o WebSocket
 
-def connect_websocket():
-    # Substitua pelo IP da sua API
-    API_URL = "ws://sua-api:8080/ws/connect"
+    logger.info(f"🚀 Iniciando servidor WebSocket em ws://{ip}:{port}")
     
-    ws = websocket.WebSocketApp(
-        API_URL,
-        on_message=on_message,
-        on_error=on_error,
-        on_close=on_close,
-        on_open=on_open
-    )
-    
-    ws.run_forever()
+    async with websockets.serve(handle_connection, ip, port):
+        logger.info(f"🎯 Servidor WebSocket rodando em ws://{ip}:{port}")
+        await asyncio.Future()  # Roda indefinidamente
 
 if __name__ == "__main__":
-    print("🚀 Iniciando cliente de display...")
-    
     # Verifica e instala dependências
     os.system("which feh || sudo apt-get install -y feh")
     
-    # Inicia o display manager
-    display = ImageDisplay()
-    
-    # Conecta ao WebSocket e mantém conexão
-    while True:
-        try:
-            connect_websocket()
-        except Exception as e:
-            print(f"❌ Erro na conexão: {e}")
-            time.sleep(5)  # Espera 5 segundos antes de tentar novamente
+    # Inicia o servidor WebSocket
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("👋 Servidor finalizado pelo usuário")
+    except Exception as e:
+        logger.error(f"❌ Erro fatal: {e}")
